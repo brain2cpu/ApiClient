@@ -1,7 +1,5 @@
-﻿using System.Collections.Specialized;
-using System.Net;
-using System.Net.Http.Json;
-using System.Text;
+﻿using System.Net;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Xml.Serialization;
 
@@ -18,7 +16,7 @@ public class ApiClient
 
     public int Retries { get; set; } = 3;
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(10);
-    public TimeSpan RetryInterval { get; set; } = TimeSpan.FromMilliseconds(100);
+    public TimeSpan RetryInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
     // keep it null or empty for the default client
     // register named client as:
@@ -49,7 +47,7 @@ public class ApiClient
         { "application/octet-stream", Download }
     };
 
-    //408Request Timeout429Too Many Requests (rate limit)500Internal Server Error502Bad Gateway503Service Unavailable504Gateway Timeout
+    //408 Request Timeout, 429 Too Many Requests, 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
     public List<int> TransientErrorCodes { get; } = [408, 429, 500, 502, 503, 504];
 
     public async Task<OpResult<T>> SendRequestAsync<T>(ApiRequest apiRequest, CancellationToken? cancellationToken = null)
@@ -61,9 +59,7 @@ public class ApiClient
         var client = string.IsNullOrEmpty(HttpClientName) ? _httpClientFactory.CreateClient() : _httpClientFactory.CreateClient(HttpClientName);
         client.Timeout = Timeout > TimeSpan.Zero ? Timeout : System.Threading.Timeout.InfiniteTimeSpan;
 
-        var response = await SendAsync<OpResult<string>>(client, requestBuilder.Data, Retries, cancellationToken);
-
-        requestBuilder.Data.Dispose();
+        var response = await SendAsync(client, requestBuilder.Data, Retries, cancellationToken);
 
         if (!response.IsSuccess)
             return OpResult<T>.Error(response.Exception, response.Message, response.StatusCode);
@@ -75,8 +71,95 @@ public class ApiClient
         return result;
     }
 
+    public async Task<OpResult> SendRequestAsync(ApiRequest apiRequest, CancellationToken? cancellationToken = null)
+        => await SendRequestAsync<string>(apiRequest, cancellationToken);
+
     public Task<OpResult<T>> GetAsync<T>(string url, CancellationToken? cancellationToken = null)
         => SendRequestAsync<T>(new ApiRequest(url) { Method = HttpMethod.Get }, cancellationToken);
+
+    public async Task<OpResult<string>> DownloadAsync(ApiRequest apiRequest, string downloadDirectory, CancellationToken? cancellationToken = null)
+    {
+        if(string.IsNullOrEmpty(downloadDirectory))
+            return OpResult<string>.Error("Download directory must be specified");
+
+        try
+        {
+            if (!Directory.Exists(downloadDirectory))
+                Directory.CreateDirectory(downloadDirectory);
+        }
+        catch (Exception xcp)
+        {
+            return OpResult<string>.Error(xcp, $"Cannot access download directory {downloadDirectory}");
+        }
+
+        var requestBuilder = PrepareRequest(apiRequest);
+        if (!requestBuilder.IsSuccess)
+            return OpResult<string>.Error(requestBuilder.Exception, "Invalid request", (int)HttpStatusCode.BadRequest);
+
+        var client = string.IsNullOrEmpty(HttpClientName) ? _httpClientFactory.CreateClient() : _httpClientFactory.CreateClient(HttpClientName);
+        client.Timeout = Timeout > TimeSpan.Zero ? Timeout : System.Threading.Timeout.InfiniteTimeSpan;
+
+        var response = await SendAsync(client, requestBuilder.Data, Retries, cancellationToken);
+        if (!response.IsSuccess)
+            return OpResult<string>.Error(response.Exception, response.Message, response.StatusCode);
+
+        var tmpPath = Path.GetTempFileName();
+        var fileName = GetFileNameFrom(response.Data.Content.Headers, apiRequest.Url);
+        try
+        {
+            await using var fileStream = new FileStream(tmpPath, FileMode.Create, FileAccess.Write);
+            await using var stream = await response.Data.Content.ReadAsStreamAsync();
+
+            await stream.CopyToAsync(fileStream);
+
+            await fileStream.FlushAsync();
+            fileStream.Close();
+
+            var destinationPath = Path.Combine(downloadDirectory, fileName);
+            File.Move(tmpPath, destinationPath);
+
+            return OpResult<string>.Success(destinationPath);
+        }
+        catch (Exception xcp)
+        {
+            return OpResult<string>.Error(xcp, "Download failed");
+        }
+        finally
+        {
+            response.Data.Dispose();
+
+            try
+            {
+                if(File.Exists(tmpPath))
+                    File.Delete(tmpPath);
+            }
+            catch
+            {
+                // we can ignore this
+            }
+        }
+    }
+
+    private static string GetFileNameFrom(HttpContentHeaders headers, Uri url)
+    {
+        if (headers.ContentDisposition != null)
+        {
+            if (!string.IsNullOrEmpty(headers.ContentDisposition.FileNameStar))
+                return headers.ContentDisposition.FileNameStar.Trim('"');
+
+            if (!string.IsNullOrEmpty(headers.ContentDisposition.FileName))
+                return headers.ContentDisposition.FileName.Trim('"');
+        }
+
+        try
+        {
+            return Path.GetFileName(url.LocalPath);
+        }
+        catch
+        {
+            return Path.GetRandomFileName();
+        }
+    }
 
     private static OpResult<HttpRequestMessage> PrepareRequest(ApiRequest apiRequest)
     {
@@ -85,13 +168,9 @@ public class ApiClient
         {
             if (apiRequest.UrlParameters.Count > 0)
             {
-                var nv = new NameValueCollection();
-                foreach (var param in apiRequest.UrlParameters)
-                    nv.Add(param.Key, param.Value);
-
                 var uriBuilder = new UriBuilder(apiRequest.Url)
                 {
-                    Query = nv.ToString()
+                    Query = string.Join("&", apiRequest.UrlParameters.Select(kv => $"{WebUtility.UrlEncode(kv.Key)}={WebUtility.UrlEncode(kv.Value)}"))
                 };
 
                 requestMessage.RequestUri = uriBuilder.Uri;
@@ -103,7 +182,9 @@ public class ApiClient
 
             foreach (var header in apiRequest.Headers)
             {
-                requestMessage.Headers.Add(header.Key, header.Value);
+                requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                // the following will throw if the header value contains invalid characters as +=/ but those are valid in some headers like Authorization 
+                //requestMessage.Headers.Add(header.Key, header.Value);
             }
 
             if (apiRequest.Content != null)
@@ -118,7 +199,7 @@ public class ApiClient
         }
     }
 
-    private async Task<OpResult<HttpResponseMessage>> SendAsync<T>(HttpClient client,
+    private async Task<OpResult<HttpResponseMessage>> SendAsync(HttpClient client,
         HttpRequestMessage requestMessage,
         int retry,
         CancellationToken? cancellationToken)
@@ -142,25 +223,25 @@ public class ApiClient
 
             return OpResult<HttpResponseMessage>.Success(responseMessage);
         }
-        catch (TaskCanceledException tex1) when (tex1.CancellationToken.IsCancellationRequested)
+        catch (TaskCanceledException) when (cancellationToken.HasValue && cancellationToken.Value.IsCancellationRequested)
         {
             // cancellation was requested
             return OpResult<HttpResponseMessage>.Cancelled();
         }
-        catch (TaskCanceledException tex2) when (!tex2.CancellationToken.IsCancellationRequested && retry > 0)
+        catch (TaskCanceledException) when (retry > 0)
         {
             // This means the request timed out, retry after a wait
             await Task.Delay(RetryInterval * (Retries - retry + 1));
-            return await SendAsync<T>(client, requestMessage, retry - 1, cancellationToken);
+            return await SendAsync(client, await CloneRequestAsync(requestMessage), retry - 1, cancellationToken);
         }
-        catch (TaskCanceledException tex3)
+        catch (TaskCanceledException tex)
         {
-            return OpResult<HttpResponseMessage>.Error(tex3, "Timeout", (int)HttpStatusCode.RequestTimeout);
+            return OpResult<HttpResponseMessage>.Error(tex, "Timeout", (int)HttpStatusCode.RequestTimeout);
         }
         catch (HttpRequestException rex1) when (retry > 0 && IsTransientCode(rex1.StatusCode))
         {
             await Task.Delay(RetryInterval * (Retries - retry + 1));
-            return await SendAsync<T>(client, requestMessage, retry - 1, cancellationToken);
+            return await SendAsync(client, await CloneRequestAsync(requestMessage), retry - 1, cancellationToken);
         }
         catch (HttpRequestException rex2)
         {
@@ -171,6 +252,38 @@ public class ApiClient
         {
             return OpResult<HttpResponseMessage>.Error(xcp, statusCode: (int)HttpStatusCode.InternalServerError);
         }
+        finally
+        {
+            requestMessage.Dispose();
+        }
+    }
+
+    private static async Task<HttpRequestMessage> CloneRequestAsync(HttpRequestMessage original)
+    {
+        var clone = new HttpRequestMessage(original.Method, original.RequestUri)
+        {
+            Version = original.Version
+        };
+
+        foreach (var header in original.Headers)
+            clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+        if (original.Content != null)
+        {
+            var ms = new MemoryStream();
+            await original.Content.CopyToAsync(ms);
+            ms.Position = 0;
+
+            var contentClone = new StreamContent(ms);
+
+            // Copy content headers
+            foreach (var header in original.Content.Headers)
+                contentClone.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+            clone.Content = contentClone;
+        }
+
+        return clone;
     }
 
     private static JsonSerializerOptions? _jsonSerializerOptions = null;
@@ -253,61 +366,5 @@ public class ApiClient
             return false;
         
         return TransientErrorCodes.Contains((int)code.Value);
-    }
-}
-
-public class ApiRequest : IDisposable
-{
-    public ApiRequest(string url) => Url = new Uri(url);
-    public ApiRequest(Uri url) => Url = url;
-    public ApiRequest(string scheme, string host, string? path, int? port = null)
-    {
-        var uriBuilder = new UriBuilder(scheme, host, port ?? -1, path);
-        Url = uriBuilder.Uri;
-    }
-    public HttpMethod Method { get; set; } = HttpMethod.Get;
-    public Uri Url { get; }
-    public Dictionary<string, string> UrlParameters { get; set; } = [];
-    public Dictionary<string, string> Headers { get; set; } = [];
-    public HttpContent? Content { get; set; } = null;
-
-    public void BuildStringContent(string s)
-        => Content = new StringContent(s);
-    
-    public void BuildJsonContent<T>(T o)
-        => Content = JsonContent.Create(o);
-
-    public void BuildXmlContent<T>(T o)
-    {
-        var xmlSerializer = new XmlSerializer(typeof(T));
-        using var stringWriter = new StringWriter();
-        xmlSerializer.Serialize(stringWriter, o);
-
-        Content = new StringContent(stringWriter.ToString(), Encoding.UTF8, "application/xml");
-    }
-
-    public void BuildFormContent(IEnumerable<KeyValuePair<string,string>> d)
-        => Content = new FormUrlEncodedContent(d);
-    
-    public void BuildUploadContent(Stream stream, string formName, string fileName)
-    {
-        var content = new MultipartFormDataContent
-        {
-            { new StreamContent(stream), formName, fileName }
-        };
-
-        Content = content;
-    }
-    
-    public string MethodString
-    {
-        get => Method.ToString();
-        set => Method = (HttpMethod)Enum.Parse(typeof(HttpMethod), value, true);
-    }
-
-    public void Dispose()
-    {
-        Content?.Dispose();
-        GC.SuppressFinalize(this);
     }
 }
