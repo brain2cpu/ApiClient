@@ -8,6 +8,7 @@ The `ApiClient` is a robust HTTP client that provides built-in support for retri
 - Configurable timeout handling
 - Content type negotiation (JSON, XML, Form data)
 - File upload support
+- File donwload support with unique file names
 - Custom client configuration
 - Strong typing with `OpResult<T>`
 - Extensible response handlers
@@ -118,6 +119,12 @@ _apiClient.RetryInterval = TimeSpan.FromSeconds(1);  // Delay between retries
 _apiClient.HttpClientName = "CustomClient";          // Named client configuration
 ```
 
+For headers to be included with every request:
+```csharp
+_apiClient.CommonHeaders.Add("Name", "Value);
+```
+If the request already has a header with the same name it will be used instead of the common one.
+
 ### Custom Response Handlers
 
 ```csharp
@@ -212,7 +219,7 @@ _apiClient.TransientErrorCodes.Add(520); // Add custom error code
 
 ```csharp
 var request = new ApiRequest("https://api.example.com");
-request.Headers["Authorization"] = "Bearer " + token;
+ApiRequest.AddBearerTokenHeader(request.Headers, token);
 request.Headers["Custom-Header"] = "value";
 ```
 

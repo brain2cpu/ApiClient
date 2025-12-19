@@ -50,6 +50,9 @@ public class ApiClient
     //408 Request Timeout, 429 Too Many Requests, 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout
     public List<int> TransientErrorCodes { get; } = [408, 429, 500, 502, 503, 504];
 
+    // Common headers to be added to every request, will be overridden by ApiRequest headers if specified
+    public Dictionary<string, string> CommonHeaders { get; } = [];
+
     public async Task<OpResult<T>> SendRequestAsync<T>(ApiRequest apiRequest, CancellationToken? cancellationToken = null)
     {
         var requestBuilder = PrepareRequest(apiRequest);
@@ -169,7 +172,7 @@ public class ApiClient
         }
     }
 
-    private static OpResult<HttpRequestMessage> PrepareRequest(ApiRequest apiRequest)
+    private OpResult<HttpRequestMessage> PrepareRequest(ApiRequest apiRequest)
     {
         var requestMessage = new HttpRequestMessage();
         try
@@ -187,6 +190,11 @@ public class ApiClient
                 requestMessage.RequestUri = apiRequest.Url;
 
             requestMessage.Method = apiRequest.Method;
+
+            foreach (var header in CommonHeaders.Where(x => !apiRequest.Headers.ContainsKey(x.Key)))
+            {
+                requestMessage.Headers.TryAddWithoutValidation(header.Key, header.Value);
+            }
 
             foreach (var header in apiRequest.Headers)
             {

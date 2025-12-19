@@ -96,6 +96,17 @@ public class ApiRequest : IDisposable
     public static string CombineUrl(params string[] segments)
         => string.Join("/", segments.Select(s => s.Trim('/')));
 
+    public static void AddBearerTokenToHeader(Dictionary<string, string> headers, string token)
+    {
+        headers["Authorization"] = $"Bearer {token}";
+    }
+
+    public static void AddBasicAuthenticationToHeader(Dictionary<string, string> headers, string user, string pass)
+    {
+        var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{pass}"));
+        headers["Authorization"] = $"Basic {credentials}";
+    }
+
     public void Dispose()
     {
         Content?.Dispose();
