@@ -23,6 +23,14 @@ builder.Services.AddHttpClient(); // Required for IHttpClientFactory
 builder.Services.AddSingleton<ApiClient>();
 ```
 
+### With Logging Support
+
+```csharp
+builder.Services.AddHttpClient(); // Required for IHttpClientFactory
+builder.Services.AddLogging(); // Enable logging
+builder.Services.AddSingleton<ApiClient>(); // Will automatically use ILogger if available
+```
+
 ### Custom Client Configuration
 
 ```csharp
@@ -125,15 +133,28 @@ _apiClient.CommonHeaders.Add("Name", "Value);
 ```
 If the request already has a header with the same name it will be used instead of the common one.
 
-### Custom Response Handlers
+### Logging Configuration
+
+The ApiClient uses `ILogger<ApiClient>` from Microsoft.Extensions.Logging for structured logging. To enable logging:
 
 ```csharp
-_apiClient.ResponseHandlers["application/custom"] = async (content, type) =>
-{
-    var data = await content.ReadAsStringAsync();
-    return JsonSerializer.Deserialize(data, type);
-};
+// In your MAUI/ASP.NET Core startup
+builder.Services
+    .AddLogging(config =>
+    {
+        config.AddConsole(); // or AddDebug(), AddFile(), etc.
+        config.SetMinimumLevel(LogLevel.Information);
+    })
+    .AddHttpClient()
+    .AddSingleton<ApiClient>();
 ```
+
+The ApiClient logs at different levels:
+- **Information**: Request initiation, completion, and downloads
+- **Warning**: Request timeouts, cancellations, and transient errors with retries
+- **Error**: Failed requests, processing errors, and unhandled exceptions
+- **Debug**: Request details, headers count, content type handling, and response processing
+
 
 ## Error Handling
 
@@ -239,4 +260,3 @@ if (result.IsSuccess)
     using var stream = result.Data;
     // Process stream
 }
-```

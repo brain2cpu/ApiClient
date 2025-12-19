@@ -2,16 +2,25 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Xml.Serialization;
+using Microsoft.Extensions.Logging;
 
 namespace Brain2CPU.ApiClient;
 
 public class ApiClient
 {
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ILogger<ApiClient>? _logger;
 
     public ApiClient(IHttpClientFactory httpClientFactory)
     {
         _httpClientFactory = httpClientFactory;
+        _logger = null;
+    }
+
+    public ApiClient(IHttpClientFactory httpClientFactory, ILogger<ApiClient> logger)
+    {
+        _httpClientFactory = httpClientFactory;
+        _logger = logger;
     }
 
     public int Retries { get; set; } = 3;
@@ -55,9 +64,14 @@ public class ApiClient
 
     public async Task<OpResult<T>> SendRequestAsync<T>(ApiRequest apiRequest, CancellationToken? cancellationToken = null)
     {
+        _logger?.LogInformation("Sending request to {Url} with method {Method}", apiRequest.Url, apiRequest.Method);
+        
         var requestBuilder = PrepareRequest(apiRequest);
         if (!requestBuilder.IsSuccess)
+        {
+            _logger?.LogError(requestBuilder.Exception, "Failed to prepare request for {Url}", apiRequest.Url);
             return OpResult<T>.Error(requestBuilder.Exception, "Invalid request", (int)HttpStatusCode.BadRequest);
+        }
 
         var client = string.IsNullOrEmpty(HttpClientName) ? _httpClientFactory.CreateClient() : _httpClientFactory.CreateClient(HttpClientName);
         client.Timeout = Timeout > TimeSpan.Zero ? Timeout : System.Threading.Timeout.InfiniteTimeSpan;
@@ -65,8 +79,13 @@ public class ApiClient
         var response = await SendAsync(client, requestBuilder.Data, Retries, cancellationToken);
 
         if (!response.IsSuccess)
-            return OpResult<T>.Error(response.Exception, response.Message, response.StatusCode);
+        {
+            _logger?.LogError("Request to {Url} failed with status {Status} - {StatusCode}: {Message}", 
+                apiRequest.Url, response.Status, response.StatusCode, response.Message);
+            return OpResult<T>.Error(response.Status, response.Exception, response.Message, response.StatusCode);
+        }
 
+        _logger?.LogDebug("Request to {Url} completed with status {StatusCode}", apiRequest.Url, response.Data.StatusCode);
         var result = await ProcessResponseAsync<T>(response.Data);
 
         response.Data.Dispose();
@@ -82,8 +101,13 @@ public class ApiClient
 
     public async Task<OpResult<string>> DownloadAsync(ApiRequest apiRequest, string downloadDirectory, CancellationToken? cancellationToken = null)
     {
+        _logger?.LogInformation("Starting download from {Url} to directory {DownloadDirectory}", apiRequest.Url, downloadDirectory);
+        
         if(string.IsNullOrEmpty(downloadDirectory))
+        {
+            _logger?.LogError("Download directory is null or empty");
             return OpResult<string>.Error("Download directory must be specified");
+        }
 
         try
         {
@@ -92,22 +116,31 @@ public class ApiClient
         }
         catch (Exception xcp)
         {
+            _logger?.LogError(xcp, "Cannot access download directory {DownloadDirectory}", downloadDirectory);
             return OpResult<string>.Error(xcp, $"Cannot access download directory {downloadDirectory}");
         }
 
         var requestBuilder = PrepareRequest(apiRequest);
         if (!requestBuilder.IsSuccess)
+        {
+            _logger?.LogError(requestBuilder.Exception, "Failed to prepare download request for {Url}", apiRequest.Url);
             return OpResult<string>.Error(requestBuilder.Exception, "Invalid request", (int)HttpStatusCode.BadRequest);
+        }
 
         var client = string.IsNullOrEmpty(HttpClientName) ? _httpClientFactory.CreateClient() : _httpClientFactory.CreateClient(HttpClientName);
         client.Timeout = Timeout > TimeSpan.Zero ? Timeout : System.Threading.Timeout.InfiniteTimeSpan;
 
         var response = await SendAsync(client, requestBuilder.Data, Retries, cancellationToken);
         if (!response.IsSuccess)
+        {
+            _logger?.LogError("Download from {Url} failed with status {StatusCode}: {Message}", apiRequest.Url, response.StatusCode, response.Message);
             return OpResult<string>.Error(response.Exception, response.Message, response.StatusCode);
+        }
 
         var tmpPath = Path.GetTempFileName();
         var fileName = GetFileNameFrom(response.Data.Content.Headers, apiRequest.Url);
+        _logger?.LogDebug("Download file name determined: {FileName}", fileName);
+        
         try
         {
             await using var fileStream = new FileStream(tmpPath, FileMode.Create, FileAccess.Write);
@@ -129,10 +162,12 @@ public class ApiClient
             }
             File.Move(tmpPath, destinationPath);
 
+            _logger?.LogInformation("Download completed successfully: {DestinationPath}", destinationPath);
             return OpResult<string>.Success(destinationPath);
         }
         catch (Exception xcp)
         {
+            _logger?.LogError(xcp, "Download to {DownloadDirectory} failed", downloadDirectory);
             return OpResult<string>.Error(xcp, "Download failed");
         }
         finally
@@ -185,6 +220,7 @@ public class ApiClient
                 };
 
                 requestMessage.RequestUri = uriBuilder.Uri;
+                _logger?.LogDebug("Request URI with parameters: {Uri}", requestMessage.RequestUri);
             }
             else
                 requestMessage.RequestUri = apiRequest.Url;
@@ -206,10 +242,12 @@ public class ApiClient
             if (apiRequest.Content != null)
                 requestMessage.Content = apiRequest.Content;
 
+            _logger?.LogDebug("Request prepared successfully with {HeaderCount} headers", requestMessage.Headers.Count());
             return OpResult<HttpRequestMessage>.Success(requestMessage);
         }
         catch (Exception xcp)
         {
+            _logger?.LogError(xcp, "Error preparing request for {Url}", apiRequest.Url);
             requestMessage.Dispose();
             return OpResult<HttpRequestMessage>.Error(xcp);
         }
@@ -237,35 +275,42 @@ public class ApiClient
                 throw;
             }
 
+            _logger?.LogDebug("Request succeeded with status code {StatusCode}", responseMessage.StatusCode);
             return OpResult<HttpResponseMessage>.Success(responseMessage);
         }
         catch (TaskCanceledException) when (cancellationToken.HasValue && cancellationToken.Value.IsCancellationRequested)
         {
+            _logger?.LogWarning("Request was cancelled by the caller");
             // cancellation was requested
             return OpResult<HttpResponseMessage>.Cancelled();
         }
         catch (TaskCanceledException) when (retry > 0)
         {
+            _logger?.LogWarning("Request timeout. Retrying {RetryCount} more time(s) after delay", retry);
             // This means the request timed out, retry after a wait
             await Task.Delay(RetryInterval * (Retries - retry + 1));
             return await SendAsync(client, await CloneRequestAsync(requestMessage), retry - 1, cancellationToken);
         }
         catch (TaskCanceledException tex)
         {
+            _logger?.LogError("Request timeout after {Retries} retries", Retries);
             return OpResult<HttpResponseMessage>.Error(tex, "Timeout", (int)HttpStatusCode.RequestTimeout);
         }
         catch (HttpRequestException rex1) when (retry > 0 && IsTransientCode(rex1.StatusCode))
         {
+            _logger?.LogWarning("Transient error {StatusCode} received. Retrying {RetryCount} more time(s)", rex1.StatusCode, retry);
             await Task.Delay(RetryInterval * (Retries - retry + 1));
             return await SendAsync(client, await CloneRequestAsync(requestMessage), retry - 1, cancellationToken);
         }
         catch (HttpRequestException rex2)
         {
+            _logger?.LogError(rex2, "HTTP request failed with status {StatusCode}", rex2.StatusCode ?? HttpStatusCode.InternalServerError);
             return OpResult<HttpResponseMessage>.Error(rex2,
                 statusCode: (int)(rex2.StatusCode ?? HttpStatusCode.InternalServerError));
         }
         catch (Exception xcp)
         {
+            _logger?.LogError(xcp, "Unexpected error during request");
             return OpResult<HttpResponseMessage>.Error(xcp, statusCode: (int)HttpStatusCode.InternalServerError);
         }
         finally
@@ -354,24 +399,34 @@ public class ApiClient
 
                     contentObject = buffer;
                 }
+                _logger?.LogDebug("Response processed successfully as {Type}", typeof(T).Name);
                 return OpResult<T>.Success((T)contentObject, (int)response.StatusCode);
             }
 
             var contentType = response.Content.Headers.ContentType?.MediaType;
             // assume default json
             if (string.IsNullOrEmpty(contentType))
+            {
+                _logger?.LogDebug("Content type not specified, assuming application/json");
                 contentType = "application/json";
+            }
 
+            _logger?.LogDebug("Processing response with content type {ContentType}", contentType);
             var handler = ResponseHandlers.SingleOrDefault(x
                 => contentType.Contains(x.Key, StringComparison.OrdinalIgnoreCase)).Value;
             
             if(handler != null)
+            {
+                _logger?.LogDebug("Using handler for content type {ContentType}", contentType);
                 return OpResult<T>.Success((T)await handler(response.Content, typeof(T)), (int)response.StatusCode);
+            }
            
+            _logger?.LogError("No handler found for content type {ContentType}", contentType);
             return OpResult<T>.Error($"Error processing response, {contentType} not handled", (int)HttpStatusCode.InternalServerError);
         }
         catch (Exception xcp)
         {
+            _logger?.LogError(xcp, "Error processing response of type {Type}", typeof(T).Name);
             return OpResult<T>.Error(xcp, "Failed processing response", (int)HttpStatusCode.InternalServerError);
         }
     }

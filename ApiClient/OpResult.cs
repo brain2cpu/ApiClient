@@ -29,6 +29,9 @@ public class OpResult
     public static OpResult Cancelled(string message = "", int statusCode = -1) 
         => new(OpStatus.Cancelled, null, message, statusCode);
 
+    public static OpResult Error(OpStatus status, Exception? exception, string message = "", int statusCode = 1) 
+        => new(status, exception, message, statusCode);
+
     public static OpResult Error(Exception? exception, string message = "", int statusCode = 1) 
         => new(OpStatus.Failed, exception, message, statusCode);
     
@@ -72,6 +75,9 @@ public class OpResult<T> : OpResult
     
     public new static OpResult<T> Cancelled(string message = "", int statusCode = -1) 
         => new(default, OpStatus.Cancelled, null, message, statusCode);
+
+    public new static OpResult<T> Error(OpStatus status, Exception? exception, string message = "", int statusCode = 1) 
+        => new(default, status, exception, message, statusCode);
 
     public new static OpResult<T> Error(Exception? exception, string message = "", int statusCode = 1) 
         => new(default, OpStatus.Failed, exception, message, statusCode);
