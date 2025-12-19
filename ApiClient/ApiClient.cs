@@ -116,6 +116,14 @@ public class ApiClient
             fileStream.Close();
 
             var destinationPath = Path.Combine(downloadDirectory, fileName);
+            var counter = 1;
+            while (File.Exists(destinationPath))
+            {
+                var fileNameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
+                var ext = Path.GetExtension(fileName);
+                destinationPath = Path.Combine(downloadDirectory, $"{fileNameWithoutExt}({counter}){ext}");
+                counter++;
+            }
             File.Move(tmpPath, destinationPath);
 
             return OpResult<string>.Success(destinationPath);
