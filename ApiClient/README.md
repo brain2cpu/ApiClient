@@ -204,7 +204,7 @@ _apiClient.TransientErrorCodes.Add(520); // Add custom error code
 ## Best Practices
 
 1. **Use Dependency Injection**
-   ```csharp
+```csharp
    public class MyService
    {
        private readonly ApiClient _apiClient;
@@ -214,25 +214,25 @@ _apiClient.TransientErrorCodes.Add(520); // Add custom error code
            _apiClient = apiClient;
        }
    }
-   ```
+```
 
 2. **Always Dispose ApiRequest**
-   ```csharp
+```csharp
    using var request = new ApiRequest("https://api.example.com");
    // Use request...
-   ```
+```
 
 3. **Handle Cancellation**
-   ```csharp
+```csharp
    using var cts = new CancellationTokenSource();
    var result = await _apiClient.SendRequestAsync<T>(request, cts.Token);
-   ```
+```
 
 4. **Set Appropriate Timeouts**
-   ```csharp
+```csharp
    // For long-running operations
    _apiClient.Timeout = TimeSpan.FromMinutes(5);
-   ```
+```
 
 ## Advanced Scenarios
 
